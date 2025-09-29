@@ -150,7 +150,7 @@ bool LoadMDX(const char *mdx_name, char *title, int title_len)
 
 void intro(){
     printf(
-        "mdx2vgm version "VERSION"\n"
+        "mdx2vgm version " VERSION "\n"
         "Copyright 2017 delek.net/deflemask.com\n"
         " based on MDXDRVg V1.50a (C) 2000 GORRY.\n"
         "  converted from X68k MXDRV music driver version 2.06+17 Rel.X5-S\n"

@@ -17,9 +17,11 @@ typedef signed char SBYTE;
 typedef signed short SWORD;
 typedef signed long SLONG;
 
+#ifndef _WIN32
 typedef long long LONGLONG;
 #define TEXT(a) (a)
 typedef char TCHAR;
+#endif
 
 typedef SWORD MXDRVG_SAMPLETYPE;
 typedef MXDRVG_SAMPLETYPE Sample;

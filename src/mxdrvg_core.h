@@ -36,6 +36,9 @@
 #include "vgm.h"
 #include "vgmwriter.h"
 #include "pdx.h"
+#include "oki_codec.h"
+
+#define OUTPUT_OPL4 1
 
 VGMWriter w;
 PDXLoader pdx;
@@ -261,10 +264,74 @@ int MXDRVG_Start(
 	// VGM WRITING
 	w.version = 0x170;
     w.ym2151_clock = 4000000;
+#if !OUTPUT_OPL4
     w.okim6258_clock = 8000000;
     w.okim6258_flags = 0x06;
+#endif
     memset(sampleIndex, 0xff, sizeof(sampleIndex));
     memset(sampleLength, 0xff, sizeof(sampleLength));
+
+#if OUTPUT_OPL4
+	struct Opl4SampleHeader
+	{
+		// Byte 0
+		uint8_t sample_start_hi : 6;  // Bits 21–16 of start address
+		uint8_t sample_type : 2;  // Bits 7–6: 00 = 8-bit, 01 = 12-bit, 10 = 16-bit
+
+		// Byte 1
+		uint8_t sample_start_mid;     // Bits 15–8 of start address
+
+		// Byte 2
+		uint8_t sample_start_lo;      // Bits 7–0 of start address
+
+		// Bytes 3–4: Loop start address (16 bits)
+		uint8_t loop_start_hi;
+		uint8_t loop_start_lo;
+
+		// Bytes 5–6: End address (16 bits)
+		uint8_t sample_end_hi;
+		uint8_t sample_end_lo;
+
+		// Byte 7: LFO and Vibrato depth
+		uint8_t vib_depth : 3;        // Bits 2–0
+		uint8_t lfo_depth : 3;        // Bits 5–3
+		uint8_t reserved7 : 2;        // Bits 6–7 unused
+
+		// Byte 8: AR and D1R (4 bits each)
+		uint8_t d1r : 4;              // Decay 1 Rate
+		uint8_t ar : 4;              // Attack Rate
+
+		// Byte 9: DL and D2R (4 bits each)
+		uint8_t d2r : 4;              // Decay 2 Rate
+		uint8_t dl : 4;              // Decay Level
+
+		// Byte 10: RR and Rate Correction (4 bits each)
+		uint8_t rr : 4;             // Release Rate
+		uint8_t rate : 4;             // Rate Correction
+
+		// Byte 11: AM depth (3 bits)
+		uint8_t am_depth : 3;       // Bits 0–2
+		uint8_t reserved11 : 5;       // Bits 3–7 unused
+	};
+	static_assert(sizeof(Opl4SampleHeader) == 12, "Opl4SampleHeader must be exactly 12 bytes");
+
+	struct VgmRamDataHeader
+	{
+		uint32_t totalRamSize;
+		uint32_t startAddress;
+	};
+
+	struct
+	{
+		VgmRamDataHeader vgmHeader;
+		Opl4SampleHeader sampleHeaders[128];
+	} headerData = {};
+
+	int dataMemoryType = 0x84;
+	int totalRamSize = 0x200000;
+	int sampleDataStartAddress = 512 * 12;
+    int sampleDataAddress = sampleDataStartAddress;
+#endif
 
     bytesInVgm += 0xFF;
     // PDX READING FOR SAMPLE OFFSETS
@@ -273,12 +340,59 @@ int MXDRVG_Start(
 		for(int i = 0; i < PDX_NUM_SAMPLES; i++) {
 			if(pdx.samples[i].length > 0) {
 				uint8_t *s = pdx.loadSample(i);
+#if OUTPUT_OPL4
+				int pcmSampleCount = pdx.samples[i].length * 2;
+				int pcmDataSize = pcmSampleCount * sizeof(int16_t);
+				int dataBlockSize = sizeof(VgmRamDataHeader) + pcmDataSize;
+				VgmRamDataHeader *pcmDataHeader = (VgmRamDataHeader*)malloc(dataBlockSize);
+				pcmDataHeader->totalRamSize = totalRamSize;
+				pcmDataHeader->startAddress = sampleDataAddress;
+				int16_t* pcmSampleData = (int16_t*)(pcmDataHeader + 1);
+				oki6258_decode(s, pcmSampleData, pcmSampleCount);
+				for (int j = 0; j < pcmSampleCount; ++j)
+				{
+					int s = pcmSampleData[j];
+					if (s < -32767) s = -32767;
+					else if (s > 32767) s = 32767;
+					pcmSampleData[j] = (uint16_t(s) >> 8) | (uint16_t(s) << 8);
+				}
+				w.writeDataBlock(dataMemoryType, dataBlockSize, (uint8_t*)pcmDataHeader);
+				free(pcmDataHeader);
+				bytesInVgm += 7 + dataBlockSize;
+
+				headerData.sampleHeaders[i].sample_type = 2;
+				headerData.sampleHeaders[i].sample_start_hi = (sampleDataAddress >> 16) & 255;
+				headerData.sampleHeaders[i].sample_start_mid = (sampleDataAddress >> 8) & 255;
+				headerData.sampleHeaders[i].sample_start_lo = sampleDataAddress & 255;
+				headerData.sampleHeaders[i].loop_start_hi = ((pcmSampleCount - 2) >> 8) & 255;
+				headerData.sampleHeaders[i].loop_start_lo = ((pcmSampleCount - 2)) & 255;
+				headerData.sampleHeaders[i].sample_end_hi = ~(((pcmSampleCount - 1) >> 8) & 255);
+				headerData.sampleHeaders[i].sample_end_lo = ~((pcmSampleCount - 1) & 255);
+				headerData.sampleHeaders[i].ar = 15;
+				headerData.sampleHeaders[i].d2r = 15;
+				headerData.sampleHeaders[i].dl = 15;
+				headerData.sampleHeaders[i].rr = 15;
+				sampleDataAddress += pcmDataSize;
+#else
 				w.writeDataBlock(0x04, pdx.samples[i].length, s);
 				bytesInVgm += (2) + 1 + 4 + pdx.samples[i].length;
+#endif
 				delete s;
 			}
 		}
 	}
+
+#if OUTPUT_OPL4
+    if (sampleDataAddress != sampleDataStartAddress)
+    {
+		w.ymf278b_clock = 0x02037E00;
+
+		headerData.vgmHeader.totalRamSize = totalRamSize;
+		headerData.vgmHeader.startAddress = 0;
+		w.writeDataBlock(dataMemoryType, sizeof(headerData), (uint8_t*)&headerData);
+		bytesInVgm += 7 + sizeof(headerData);
+    }
+#endif
 
     w.writeYM2151(0x01, 0x00);
     bytesInVgm += 3;
@@ -292,10 +406,20 @@ int MXDRVG_Start(
     bytesInVgm += 3;
     w.writeYM2151(0x1b, 0x00);
     bytesInVgm += 3;
+#if OUTPUT_OPL4
+    if (sampleDataAddress != sampleDataStartAddress)
+    {
+		w.writeYMF278(OPL4_FM2, 0x05, 0x03); // OPL4
+		w.writeYMF278(OPL4_WAVE, 0x02, 0x00 /*0x10*/); // memory config
+		w.writeYMF278(OPL4_FM1, 0x08, 0x00); // keyboard split
+		bytesInVgm += 4 * 3;
+    }
+#else
     w.writeSetupStreamControl(0x00, VGM_OKIM6258, 0x00, 0x01);
     bytesInVgm += 5;
     w.writeSetStreamData(0x00, 0x04, 0x01, 0x00);
     bytesInVgm += 5;
+#endif
 
 	ret = Initialize( mdxbufsize, pdxbufsize );
 	if ( ret != 0 ) {
@@ -334,12 +458,14 @@ void MXDRVG_End(
 	memset((void*)MXDRVG_WORK_CHBUF_PCM, 0, sizeof(MXDRVG_WORK_CHBUF_PCM));
 	memset((void*)&OPMBUF, 0, sizeof(OPMBUF));
 
+#if 0
 	if(bytesInLoop>0 && bytesInVgm > bytesInLoop && samplesInLoop>0){
-		w.loop_offset = bytesInVgm - bytesInLoop - 1;
+		w.loop_offset = bytesInVgm - bytesInLoop - 1 - 0x1c;
 		w.loop_samples = samplesInLoop;
 
 		printf("Loop information - Loop offset: %d Loop samples: %d\n", w.loop_offset, w.loop_samples);
 	}
+#endif
 	w.write(filename);
 }
 
@@ -490,6 +616,16 @@ static void PCM8_NOTE_ON( int sample ){
 		}
 		samplesToWait=0;
 
+#if OUTPUT_OPL4
+		int ch = 0;
+		w.writeYMF278(OPL4_WAVE, 0x50+ch, 0x00); // volume
+		w.writeYMF278(OPL4_WAVE, 0x38+ch, 0x00); // octave, f-number
+		w.writeYMF278(OPL4_WAVE, 0x20+ch, 0x02); // f-number, sample index
+		w.writeYMF278(OPL4_WAVE, 0x08+ch, sample);; // sample index
+		w.writeYMF278(OPL4_WAVE, 0x68+ch, 0x80); // key on, pan
+
+		bytesInVgm += 4 * 5;
+#else
 		w.writeOKIM6258Pan(0x00);
 		w.writeOKIM6258(0x00, 0x02);
 		w.writeOKIM6258(0x0c, 0x02);
@@ -497,6 +633,7 @@ static void PCM8_NOTE_ON( int sample ){
 		w.writeStartStream(0x00, sample, 0x00);
 
 		bytesInVgm += (1+1) + (1+2) + (1+2) + (1+1+4) + (1+2+2);
+#endif
 	}
 	else{
 		if(samplesToWait>0){
@@ -504,7 +641,12 @@ static void PCM8_NOTE_ON( int sample ){
 			samplesInLoop += samplesToWait;
 		}
 		samplesToWait=0;
+
+#if OUTPUT_OPL4
+		bytesInLoop += 4 * 5;
+#else
 		bytesInLoop += (1+1) + (1+2) + (1+2) + (1+1+4) + (1+2+2);
+#endif
 	}
 }
 
@@ -583,10 +725,10 @@ static void OPM_SUB(
 		if(samplesToWait>0){
 			bytesInVgm += w.writeWait(samplesToWait, 1);
 		}
-	    w.writeYM2151((UBYTE)D1, (UBYTE)D2);
-	    samplesToWait = 0;
+		samplesToWait = 0;
 
-	    bytesInVgm += (1+2);
+		w.writeYM2151((UBYTE)D1, (UBYTE)D2);
+		bytesInVgm += (1+2);
 	}
 	else{
 		if(samplesToWait>0){
@@ -594,6 +736,7 @@ static void OPM_SUB(
 			samplesInLoop += samplesToWait;
 		}
 		samplesToWait=0;
+
 		bytesInLoop += (1+2);
 	}
 }
@@ -5898,7 +6041,7 @@ L001410:;
 														bra     L00143e
 */
 	G.L002246++;
-	startSearchingLoop = 1;
+	startSearchingLoop = 0;
 	goto L00143e;
 
 L001416:;

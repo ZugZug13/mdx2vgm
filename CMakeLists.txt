@@ -10,5 +10,6 @@ set(CMAKE_CXX_FLAGS_DEBUG "-Wall -g")
 
 add_executable(mdx2vgm
 	src/mdx2vgm.cpp
+	src/oki_codec.c
 )
 

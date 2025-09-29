@@ -8,6 +8,13 @@ enum VGMChipType {
 	VGM_OKIM6258 = 0x17,
 };
 
+enum Opl4PortType
+{
+	OPL4_FM1,
+	OPL4_FM2,
+	OPL4_WAVE,
+};
+
 struct VGMWriter: VGM {
 	Buffer buf;
 	VGMWriter() { reset(); }
@@ -30,6 +37,12 @@ struct VGMWriter: VGM {
 	}
 	void writeYM2151(uint8_t reg, uint8_t val) {
 		buf.writeUint8(0x54);
+		buf.writeUint8(reg);
+		buf.writeUint8(val);
+	}
+	void writeYMF278(Opl4PortType type, uint8_t reg, uint8_t val) {
+		buf.writeUint8(0xd0);
+		buf.writeUint8(type);
 		buf.writeUint8(reg);
 		buf.writeUint8(val);
 	}
